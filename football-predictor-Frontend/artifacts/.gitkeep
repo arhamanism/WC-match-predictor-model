@@ -1,0 +1,4 @@
+This folder holds generated model artifacts (cat_model.cbm, schema.json,
+team_recent_form.json, head_to_head.json, elo_ratings.json, teams.json,
+tournaments.json, countries.json). Run export_artifacts.py in your Colab
+notebook and unzip its output here.
