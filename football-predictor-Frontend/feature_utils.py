@@ -1,3 +1,12 @@
+"""
+Feature engineering for a single hypothetical match, mirroring the exact
+logic used to build training features in World_Cup_Match_Predictor.ipynb.
+
+This module turns (home_team, away_team, tournament, country, neutral, date)
+into a one-row DataFrame with the same columns/order the CatBoost model was
+trained on, using the lookup tables produced by export_artifacts.py.
+"""
+
 import json
 import pickle
 from pathlib import Path
@@ -8,7 +17,13 @@ ARTIFACTS_DIR = Path(__file__).parent / "artifacts"
 
 
 def load_artifacts():
+    """Load model, schema, and all lookup tables. Call once and cache.
 
+    Note: CatBoost is trained directly on raw string categoricals via its
+    built-in cat_features handling (see cells 80-81 of the notebook, which
+    use train_raw/test_raw straight from df, NOT the ordinal-encoded
+    train_2/test_2). So no separate encoder is needed at inference time.
+    """
     from catboost import CatBoostClassifier
 
     model = CatBoostClassifier()
@@ -138,6 +153,7 @@ def build_feature_row(artifacts, home_team, away_team, tournament, country, neut
         "home_higher_elo": int(home_elo > away_elo),
     }
 
+    # Enforce exact training column order
     return pd.DataFrame([row])[schema["predictors"]]
 
 
@@ -145,6 +161,8 @@ def predict_match(artifacts, home_team, away_team, tournament, country, neutral,
     """Return (predicted_label, {label: probability}) for one matchup."""
     X = build_feature_row(artifacts, home_team, away_team, tournament, country, neutral, match_date)
 
+    # CatBoost takes raw string categoricals directly - no encoder needed
+    # (see load_artifacts docstring for why).
     model = artifacts["model"]
     proba = model.predict_proba(X)[0]
     class_names = artifacts["schema"]["class_names"]
@@ -152,3 +170,51 @@ def predict_match(artifacts, home_team, away_team, tournament, country, neutral,
     probs = dict(zip(class_names, proba))
     predicted_label = max(probs, key=probs.get)
     return predicted_label, probs
+
+
+def _form_record(team_recent_form, team):
+    """Convert a team's last-5 points list (3/1/0 per match) into a W/D/L record."""
+    points = team_recent_form.get(team, [])
+    wins = points.count(3)
+    draws = points.count(1)
+    losses = points.count(0)
+    parts = []
+    if wins:
+        parts.append(f"{wins}W")
+    if draws:
+        parts.append(f"{draws}D")
+    if losses:
+        parts.append(f"{losses}L")
+    return "/".join(parts) if parts else "No data"
+
+
+def get_match_insights(artifacts, home_team, away_team):
+    """Human-readable talking points for a matchup: ELO gap, form, head-to-head edge."""
+    elo_ratings = artifacts["elo_ratings"]
+    default_elo = sum(elo_ratings.values()) / len(elo_ratings) if elo_ratings else 1500
+    home_elo = elo_ratings.get(home_team, default_elo)
+    away_elo = elo_ratings.get(away_team, default_elo)
+    elo_gap = abs(round(home_elo - away_elo))
+    elo_favored = home_team if home_elo > away_elo else away_team if away_elo > home_elo else None
+
+    home_form = _form_record(artifacts["team_recent_form"], home_team)
+    away_form = _form_record(artifacts["team_recent_form"], away_team)
+
+    h2h = _head_to_head(artifacts["head_to_head"], home_team, away_team)
+    home_wins, away_wins = h2h["home_h2h_wins"], h2h["away_h2h_wins"]
+    if h2h["h2h_matches_played"] == 0:
+        h2h_summary = "No prior meetings"
+    elif home_wins > away_wins:
+        h2h_summary = f"{home_team} edge, {home_wins}-{away_wins}"
+    elif away_wins > home_wins:
+        h2h_summary = f"{away_team} edge, {away_wins}-{home_wins}"
+    else:
+        h2h_summary = f"Even, {home_wins}-{away_wins}"
+
+    return {
+        "elo_gap": elo_gap,
+        "elo_favored": elo_favored,
+        "home_form": home_form,
+        "away_form": away_form,
+        "h2h_summary": h2h_summary,
+    }
